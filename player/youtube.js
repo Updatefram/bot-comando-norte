@@ -26,19 +26,42 @@ async function resolveToTracks(input, { requestedById }) {
     if (!raw) throw new Error('QUERY_VAZIA');
 
     let normalized = raw;
+    let prefetchedPlaylist = null;
     try {
         const u = new URL(raw);
         const host = String(u.hostname || '').toLowerCase();
-        const isYouTubeHost = host === 'www.youtube.com' || host === 'youtube.com' || host === 'm.youtube.com';
+        const isYouTubeHost =
+            host === 'www.youtube.com' ||
+            host === 'youtube.com' ||
+            host === 'm.youtube.com' ||
+            host === 'music.youtube.com';
+        const isShortHost = host === 'youtu.be';
+
+        if (isShortHost) {
+            const id = String(u.pathname || '').replace(/^\/+/, '').split('/')[0];
+            if (id) normalized = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+        }
+
         if (isYouTubeHost && u.pathname === '/watch') {
+            const v = u.searchParams.get('v');
             const list = u.searchParams.get('list');
-            if (list && /^\w+/.test(list)) {
+            if (list && list !== 'WL' && /^\w+/.test(list)) {
                 const playlistUrl = `https://www.youtube.com/playlist?list=${encodeURIComponent(list)}`;
-                const typeFromWatch = playdl.validate(raw);
-                if (typeFromWatch === 'yt_playlist' || typeFromWatch === 'yt_music_playlist') {
+                const info = await withTimeout(playdl.playlist_info(playlistUrl, { incomplete: true }), 8000, 'yt-playlist-detect').catch(
+                    () => null
+                );
+                if (info) {
+                    prefetchedPlaylist = info;
                     normalized = playlistUrl;
+                } else if (v) {
+                    normalized = `https://www.youtube.com/watch?v=${encodeURIComponent(v)}`;
                 }
+            } else if (v) {
+                normalized = `https://www.youtube.com/watch?v=${encodeURIComponent(v)}`;
             }
+        } else if (isYouTubeHost && u.pathname === '/playlist') {
+            const list = u.searchParams.get('list');
+            if (list && /^\w+/.test(list)) normalized = `https://www.youtube.com/playlist?list=${encodeURIComponent(list)}`;
         }
     } catch {}
 
@@ -52,7 +75,8 @@ async function resolveToTracks(input, { requestedById }) {
     }
 
     if (type === 'yt_playlist' || type === 'yt_music_playlist') {
-        const playlist = await withTimeout(playdl.playlist_info(normalized, { incomplete: true }), 20000, 'yt-playlist');
+        const playlist =
+            prefetchedPlaylist && String(prefetchedPlaylist?.url ?? '') ? prefetchedPlaylist : await withTimeout(playdl.playlist_info(normalized, { incomplete: true }), 20000, 'yt-playlist');
         const videos = await withTimeout(playlist.all_videos(), 30000, 'yt-playlist-videos');
         const limited = Array.isArray(videos) ? videos.slice(0, 200) : [];
         if (!limited.length) throw new Error('NAO_ENCONTRADO');

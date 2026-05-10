@@ -2095,9 +2095,45 @@ function logWarn(message) {
     console.warn(`[${formatTimestamp()}] WARN  ${message}`);
 }
 
+const errorBuckets = new Map();
+
+function isCommonDiscordError(err) {
+    const code = Number(err?.code ?? err?.rawError?.code ?? NaN);
+    if (!Number.isFinite(code)) return false;
+    return code === 10003 || code === 10008 || code === 50001 || code === 50013 || code === 50035;
+}
+
+function errKey(err) {
+    const code = String(err?.code ?? err?.rawError?.code ?? err?.name ?? '');
+    const msg = String(err?.message ?? err ?? '').slice(0, 180);
+    return `${code}:${msg}`;
+}
+
 function logError(message, err) {
-    console.error(`[${formatTimestamp()}] ERROR ${message}`);
-    if (err) console.error(err);
+    const windowMs = 60000;
+    const key = `${message}:${errKey(err)}`;
+    const now = Date.now();
+    const prev = errorBuckets.get(key) ?? { lastAt: 0, suppressed: 0 };
+    if (now - prev.lastAt < windowMs) {
+        prev.suppressed++;
+        errorBuckets.set(key, prev);
+        return;
+    }
+    const suppressed = prev.suppressed;
+    prev.lastAt = now;
+    prev.suppressed = 0;
+    errorBuckets.set(key, prev);
+
+    console.error(`[${formatTimestamp()}] ERROR ${message}${suppressed ? ` (suprimido ${suppressed})` : ''}`);
+    if (!err) return;
+    if (isCommonDiscordError(err)) {
+        const code = String(err?.code ?? err?.rawError?.code ?? '');
+        const status = String(err?.status ?? '');
+        const emsg = String(err?.message ?? err ?? '');
+        console.error(`${code ? `code=${code} ` : ''}${status ? `status=${status} ` : ''}${emsg}`.trim());
+        return;
+    }
+    console.error(err);
 }
 
 client.once('clientReady', () => {
@@ -3284,8 +3320,40 @@ client.on('interactionCreate', async (interaction) => {
                     await replyAndDelete(interaction, '❌ Link não suportado. Use vídeo/playlist do YouTube ou nome da música.');
                     return;
                 }
+                if (code === 'SEM_PERMISSAO_VOICE') {
+                    await replyAndDeleteMs(interaction, '❌ Sem permissão para entrar/falar na sala de voz.', 20000);
+                    return;
+                }
+                if (code === 'SALA_CHEIA') {
+                    await replyAndDeleteMs(interaction, '❌ A sala de voz está cheia. Escolha outra sala.', 20000);
+                    return;
+                }
+                if (code === 'VOICE_TIMEOUT') {
+                    await replyAndDeleteMs(interaction, getVoiceTimeoutHelp(), 25000);
+                    return;
+                }
+                if (code === 'DESTROYED') {
+                    await replyAndDelete(interaction, '⚠️ O player foi reiniciado. Tente novamente.');
+                    return;
+                }
+                if (code === 'STREAM_FALHOU') {
+                    await replyAndDeleteMs(interaction, '❌ Não consegui abrir o áudio desse link. Tente outro vídeo/playlist.', 20000);
+                    return;
+                }
+                const msg = String(err?.message ?? '');
+                const isUserError =
+                    msg.includes('Sign in') ||
+                    msg.includes('private video') ||
+                    msg.includes('unavailable') ||
+                    msg.includes('Video unavailable') ||
+                    msg.includes('This video is not available') ||
+                    msg.includes('age-restricted');
+                if (isUserError) {
+                    await replyAndDeleteMs(interaction, '❌ Esse vídeo não está disponível para tocar (restrito/privado/indisponível).', 20000);
+                    return;
+                }
                 logError('Erro no modal musicpanel_addlink_modal', err);
-                await replyAndDelete(interaction, '❌ Erro ao adicionar o link. Tente novamente.');
+                await replyAndDeleteMs(interaction, '❌ Erro ao adicionar o link. Tente novamente.', 20000);
             }
             return;
         }
