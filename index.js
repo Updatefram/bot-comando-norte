@@ -119,7 +119,7 @@ const MUSIC_HISTORY_PATH = path.join(__dirname, 'music-history.json');
 let musicHistoryWriteChain = Promise.resolve();
 let musicHistory = [];
 
-const MUSIC_PANEL_CHANNEL_ID = '1344459876704845876';
+const MUSIC_PANEL_CHANNEL_ID = '1502827526282805279';
 const MUSIC_PANEL_CUSTOM_PREFIX = 'musicpanel_';
 const COMMANDS_ALLOWED_CHANNEL_ID = '1345452100204757033';
 const ADMIN_PANEL_CHANNEL_ID = COMMANDS_ALLOWED_CHANNEL_ID;
