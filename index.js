@@ -247,7 +247,11 @@ async function ensureCanPlayNow(interaction) {
             `Node atual: ${process.versions.node}\n` +
             'Use Node LTS 22 (recomendado pelo discord.js/@discordjs/voice) e reinicie o bot.';
         if (interaction?.deferred || interaction?.replied) {
-            await interaction.editReply(msg).catch(() => {});
+            if (interaction.deferred || interaction.replied) {
+    await interaction.editReply({
+        content: msg
+    }).catch(() => {});
+}
             scheduleDeleteReply(interaction);
         } else {
             await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -263,7 +267,7 @@ async function ensureCanPlayNow(interaction) {
         'Depois reinicie o bot.\n' +
         'Se ainda não tocar, use Node LTS (22) ou instale Build Tools do Visual Studio para usar @discordjs/opus.';
     if (interaction?.deferred || interaction?.replied) {
-        await interaction.editReply(msg).catch(() => {});
+        await safeEditReply(interaction, msg);
         scheduleDeleteReply(interaction);
     } else {
         await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral }).catch(() => {});
