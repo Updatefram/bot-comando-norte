@@ -119,16 +119,16 @@ const MUSIC_HISTORY_PATH = path.join(__dirname, 'music-history.json');
 let musicHistoryWriteChain = Promise.resolve();
 let musicHistory = [];
 
-const MUSIC_PANEL_CHANNEL_ID = '1502827526282805279';
+const MUSIC_PANEL_CHANNEL_ID = config.musicPanelChannelId || '1502827526282805279';
 const MUSIC_PANEL_CUSTOM_PREFIX = 'musicpanel_';
-const COMMANDS_ALLOWED_CHANNEL_ID = '1345452100204757033';
-const ADMIN_PANEL_CHANNEL_ID = COMMANDS_ALLOWED_CHANNEL_ID;
+const COMMANDS_ALLOWED_CHANNEL_ID = config.commandsAllowedChannelId || '1345452100204757033';
+const ADMIN_PANEL_CHANNEL_ID = config.adminPanelChannelId || COMMANDS_ALLOWED_CHANNEL_ID;
 const ADMIN_PANEL_CUSTOM_PREFIX = 'adminpanel_';
-const PAINELADM_COMMAND_CHANNEL_ID = '1502806445203390635';
-const VISITOR_ROLE_ID = '1344513058621624320';
-const VERIFIED_EXTRA_ROLE_ID = '1502763123780751420';
-const WELCOME_CHANNEL_ID = '1502749407148376074';
-const GOODBYE_CHANNEL_ID = '1502749892882206900';
+const PAINELADM_COMMAND_CHANNEL_ID = config.painelAdmCommandChannelId || '1502806445203390635';
+const VISITOR_ROLE_ID = config.visitorRoleId || '1344513058621624320';
+const VERIFIED_EXTRA_ROLE_ID = config.verifiedExtraRoleId || '1502763123780751420';
+const WELCOME_CHANNEL_ID = config.welcomeChannelId || '1502749407148376074';
+const GOODBYE_CHANNEL_ID = config.goodbyeChannelId || '1502749892882206900';
 
 function getAdminPanelChannelId() {
     const configured = /^\d{17,20}$/.test(String(config.adminPanelChannelId ?? '')) ? String(config.adminPanelChannelId) : null;
@@ -690,6 +690,46 @@ async function handleAdminPanelChannelTargetsFromIds(interaction, action, select
             const ch = targets[0];
             await updateRootConfig({ logVerificacaoId: ch.id });
             await interaction.update({ content: `✅ Canal de logs da verificação configurado: <#${ch.id}>`, components: [] }).catch(() => {});
+            scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
+            return;
+        }
+
+        if (action === 'music_panel_channel') {
+            const ch = targets[0];
+            await updateRootConfig({ musicPanelChannelId: ch.id });
+            await interaction.update({ content: `✅ Canal do painel de música configurado: <#${ch.id}>`, components: [] }).catch(() => {});
+            scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
+            return;
+        }
+
+        if (action === 'commands_allowed_channel') {
+            const ch = targets[0];
+            await updateRootConfig({ commandsAllowedChannelId: ch.id });
+            await interaction.update({ content: `✅ Canal permitido para comandos configurado: <#${ch.id}>`, components: [] }).catch(() => {});
+            scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
+            return;
+        }
+
+        if (action === 'painel_adm_channel') {
+            const ch = targets[0];
+            await updateRootConfig({ painelAdmCommandChannelId: ch.id });
+            await interaction.update({ content: `✅ Canal para comandos do painel ADM configurado: <#${ch.id}>`, components: [] }).catch(() => {});
+            scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
+            return;
+        }
+
+        if (action === 'welcome_channel') {
+            const ch = targets[0];
+            await updateRootConfig({ welcomeChannelId: ch.id });
+            await interaction.update({ content: `✅ Canal de boas-vindas configurado: <#${ch.id}>`, components: [] }).catch(() => {});
+            scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
+            return;
+        }
+
+        if (action === 'goodbye_channel') {
+            const ch = targets[0];
+            await updateRootConfig({ goodbyeChannelId: ch.id });
+            await interaction.update({ content: `✅ Canal de despedidas configurado: <#${ch.id}>`, components: [] }).catch(() => {});
             scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
             return;
         }
@@ -1338,6 +1378,11 @@ function buildAdminPanelComponents() {
             { label: 'Aviso para User', value: 'adminpanel_avisouser', emoji: '👤' },
             { label: 'Aviso Geral', value: 'adminpanel_avisogeral', emoji: '📣' },
             { label: 'Verificação: Canal de Logs', value: 'adminpanel_verificacao_logs', emoji: '📋' },
+            { label: 'Música: Canal do Painel', value: 'adminpanel_music_panel_channel', emoji: '🎵' },
+            { label: 'Comandos: Canal Permitido', value: 'adminpanel_commands_allowed_channel', emoji: '⚙️' },
+            { label: 'Painel ADM: Canal de Comando', value: 'adminpanel_painel_adm_channel', emoji: '🧩' },
+            { label: 'Boas-vindas: Canal', value: 'adminpanel_welcome_channel', emoji: '👋' },
+            { label: 'Despedidas: Canal', value: 'adminpanel_goodbye_channel', emoji: '👋' },
             { label: 'Setagem: Canal do Painel', value: 'adminpanel_setagem_painelcanal', emoji: '⚙️' },
             { label: 'Setagem: Canal de Aprovação', value: 'adminpanel_setagem_aprovacao', emoji: '✅' },
             { label: 'Setagem: Canal da Lista', value: 'adminpanel_setagem_lista', emoji: '📋' },
@@ -1387,6 +1432,26 @@ async function runAdminPanelAction(interaction, id) {
     }
     if (id === 'adminpanel_verificacao_logs') {
         await promptAdminChannelSelect(interaction, { action: 'verificacao_logs', content: 'Selecione o canal de logs da verificação (18+).' });
+        return;
+    }
+    if (id === 'adminpanel_music_panel_channel') {
+        await promptAdminChannelSelect(interaction, { action: 'music_panel_channel', content: 'Selecione o canal para o painel de música.' });
+        return;
+    }
+    if (id === 'adminpanel_commands_allowed_channel') {
+        await promptAdminChannelSelect(interaction, { action: 'commands_allowed_channel', content: 'Selecione o canal permitido para comandos.' });
+        return;
+    }
+    if (id === 'adminpanel_painel_adm_channel') {
+        await promptAdminChannelSelect(interaction, { action: 'painel_adm_channel', content: 'Selecione o canal para comandos do painel ADM.' });
+        return;
+    }
+    if (id === 'adminpanel_welcome_channel') {
+        await promptAdminChannelSelect(interaction, { action: 'welcome_channel', content: 'Selecione o canal de boas-vindas.' });
+        return;
+    }
+    if (id === 'adminpanel_goodbye_channel') {
+        await promptAdminChannelSelect(interaction, { action: 'goodbye_channel', content: 'Selecione o canal de despedidas.' });
         return;
     }
     if (id === 'adminpanel_setagem_painelcanal') {

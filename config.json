@@ -63,5 +63,12 @@
     "listChannelId": "1502759130778046697"
   },
   "adminPanelChannelId": "1502808029790339173",
-  "adminPanelMessageId": "1502819370378985583"
+  "adminPanelMessageId": "1502819370378985583",
+  "musicPanelChannelId": "1502827526282805279",
+  "commandsAllowedChannelId": "1345452100204757033",
+  "painelAdmCommandChannelId": "1502806445203390635",
+  "visitorRoleId": "1344513058621624320",
+  "verifiedExtraRoleId": "1502763123780751420",
+  "welcomeChannelId": "1502749407148376074",
+  "goodbyeChannelId": "1502749892882206900"
 }
