@@ -27,13 +27,12 @@ require('dotenv').config();
 
 const config = require('./config.json');
 const { buildCommands } = require('./deploy-commands');
+const { commands: musicSlashCommands } = require('./commands/music');
+const musicSlashByName = new Map(musicSlashCommands.map((c) => [c.name, c]));
 
 const BOT_TOKEN = String(process.env.TOKEN ?? process.env.DISCORD_TOKEN ?? config.token ?? '').trim();
 const APP_CLIENT_ID = String(process.env.CLIENT_ID ?? config.clientId ?? '').trim();
 const APP_GUILD_ID = String(process.env.GUILD_ID ?? config.guildId ?? '').trim();
-const SPOTIFY_CLIENT_ID = String(process.env.SPOTIFY_CLIENT_ID ?? '').trim();
-const SPOTIFY_CLIENT_SECRET = String(process.env.SPOTIFY_CLIENT_SECRET ?? '').trim();
-const SPOTIFY_MARKET = String(process.env.SPOTIFY_MARKET ?? 'BR').trim().toUpperCase();
 
 let ffmpegPath = null;
 try {
@@ -65,10 +64,14 @@ const {
     VoiceConnectionStatus
 } = require('@discordjs/voice');
 const playdl = require('play-dl');
+const { MusicManager, LOOP } = require('./player/musicManager');
+const musicLogger = require('./utils/logger');
 
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildVoiceStates]
 });
+
+const musicManager = new MusicManager({ client, logger: musicLogger });
 
 const AUTO_DELETE_MS = 10000;
 const AGE_VERIFY_DELETE_MS = 10000;
@@ -1007,190 +1010,6 @@ async function youtubeSearchFirstUrl(query) {
     }
 }
 
-let spotifyTokenCache = { accessToken: null, expiresAtMs: 0 };
-
-async function spotifyFetchAccessToken() {
-    if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) return null;
-    const now = Date.now();
-    if (spotifyTokenCache.accessToken && spotifyTokenCache.expiresAtMs - now > 30000) return spotifyTokenCache.accessToken;
-
-    const basic = Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`, 'utf8').toString('base64');
-    const body = new URLSearchParams({ grant_type: 'client_credentials' });
-    const res = await withTimeout(
-        fetch('https://accounts.spotify.com/api/token', {
-            method: 'POST',
-            headers: { Authorization: `Basic ${basic}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-            body
-        }),
-        15000,
-        'spotify-token'
-    ).catch(() => null);
-    if (!res || !res.ok) return null;
-    const json = await res.json().catch(() => null);
-    const token = String(json?.access_token ?? '').trim();
-    const expiresIn = Number(json?.expires_in ?? 0);
-    if (!token || !Number.isFinite(expiresIn) || expiresIn <= 0) return null;
-    spotifyTokenCache = { accessToken: token, expiresAtMs: now + expiresIn * 1000 };
-    return token;
-}
-
-function parseSpotifyIdFromUrl(url) {
-    try {
-        const u = new URL(String(url));
-        const host = String(u.hostname || '').toLowerCase();
-        const pathParts = String(u.pathname || '')
-            .split('/')
-            .map((p) => p.trim())
-            .filter(Boolean);
-        if (!host.endsWith('spotify.com')) return null;
-        const kind = pathParts[0] ?? '';
-        const id = pathParts[1] ?? '';
-        if (!id) return null;
-        if (kind === 'track' || kind === 'playlist' || kind === 'album') return { kind, id };
-        return null;
-    } catch {
-        return null;
-    }
-}
-
-async function resolveFinalUrlIfShort(link) {
-    const raw = String(link ?? '').trim();
-    if (!raw) return raw;
-    try {
-        const u = new URL(raw);
-        const host = String(u.hostname || '').toLowerCase();
-        const isShort = host.endsWith('spotify.link') || host === 'spoti.fi';
-        if (!isShort) return raw;
-        const res = await withTimeout(fetch(raw, { method: 'GET', redirect: 'follow' }), 15000, 'spotify-redirect').catch(() => null);
-        return res?.url ? String(res.url) : raw;
-    } catch {
-        return raw;
-    }
-}
-
-async function spotifyApiGet(pathname, query = {}) {
-    const token = await spotifyFetchAccessToken();
-    if (!token) throw new Error('SPOTIFY_PRECISA_CREDENCIAIS');
-    const u = new URL(`https://api.spotify.com${pathname}`);
-    for (const [k, v] of Object.entries(query ?? {})) {
-        if (v === undefined || v === null) continue;
-        u.searchParams.set(k, String(v));
-    }
-    const res = await withTimeout(fetch(u.toString(), { headers: { Authorization: `Bearer ${token}` } }), 15000, `spotify-api:${pathname}`).catch(() => null);
-    if (!res || !res.ok) throw new Error('SPOTIFY_API_FALHOU');
-    const json = await res.json().catch(() => null);
-    if (!json) throw new Error('SPOTIFY_API_FALHOU');
-    return json;
-}
-
-async function spotifyOEmbedTitle(link) {
-    const u = new URL('https://open.spotify.com/oembed');
-    u.searchParams.set('url', String(link));
-    const res = await withTimeout(fetch(u.toString()), 15000, 'spotify-oembed').catch(() => null);
-    if (!res || !res.ok) return null;
-    const json = await res.json().catch(() => null);
-    const title = String(json?.title ?? '').trim();
-    return title ? title : null;
-}
-
-function buildSpotifyQueryFromTrackMeta({ name, artists }) {
-    const n = String(name ?? '').trim();
-    const a = Array.isArray(artists) ? artists.map((x) => String(x ?? '').trim()).filter(Boolean) : [];
-    const joined = [n, ...a].filter(Boolean).join(' ');
-    return joined ? `${joined} audio` : null;
-}
-
-async function resolveSpotifyToTracks(link, requestedById, guildName) {
-    const normalized = await resolveFinalUrlIfShort(link);
-    const info = parseSpotifyIdFromUrl(normalized);
-    if (!info) throw new Error('LINK_INVALIDO');
-
-    if (info.kind === 'track') {
-        if (SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET) {
-            const json = await spotifyApiGet(`/v1/tracks/${info.id}`, { market: SPOTIFY_MARKET });
-            const name = String(json?.name ?? '').trim();
-            const artists = Array.isArray(json?.artists) ? json.artists.map((a) => a?.name) : [];
-            const query = buildSpotifyQueryFromTrackMeta({ name, artists });
-            if (!query) throw new Error('SPOTIFY_API_FALHOU');
-            const found = await youtubeSearchFirstUrl(query);
-            if (!found) throw new Error('SPOTIFY_SEM_RESULTADO');
-            return [
-                {
-                    url: found.url,
-                    title: `${name || found.title}`,
-                    requestedById,
-                    source: 'Spotify',
-                    guildName
-                }
-            ];
-        }
-
-        const title = await spotifyOEmbedTitle(normalized);
-        if (!title) throw new Error('SPOTIFY_API_FALHOU');
-        const found = await youtubeSearchFirstUrl(`${title} audio`);
-        if (!found) throw new Error('SPOTIFY_SEM_RESULTADO');
-        return [
-            {
-                url: found.url,
-                title,
-                requestedById,
-                source: 'Spotify',
-                guildName
-            }
-        ];
-    }
-
-    if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) throw new Error('SPOTIFY_PRECISA_CREDENCIAIS');
-
-    if (info.kind === 'album') {
-        const album = await spotifyApiGet(`/v1/albums/${info.id}`, { market: SPOTIFY_MARKET });
-        const albumName = String(album?.name ?? '').trim();
-        const items = Array.isArray(album?.tracks?.items) ? album.tracks.items : [];
-        const tracks = [];
-        const max = Math.min(50, items.length);
-        for (let i = 0; i < max; i++) {
-            const t = items[i];
-            const name = String(t?.name ?? '').trim();
-            const artists = Array.isArray(t?.artists) ? t.artists.map((a) => a?.name) : [];
-            const query = buildSpotifyQueryFromTrackMeta({ name, artists });
-            if (!query) continue;
-            const found = await youtubeSearchFirstUrl(query);
-            if (!found) continue;
-            tracks.push({ url: found.url, title: `${name || found.title} • ${albumName || 'Album'}`, requestedById, source: 'Spotify', guildName });
-        }
-        if (!tracks.length) throw new Error('SPOTIFY_SEM_RESULTADO');
-        return tracks;
-    }
-
-    if (info.kind === 'playlist') {
-        const tracks = [];
-        let offset = 0;
-        const limit = 100;
-        while (tracks.length < 50) {
-            const page = await spotifyApiGet(`/v1/playlists/${info.id}/tracks`, { market: SPOTIFY_MARKET, limit, offset });
-            const items = Array.isArray(page?.items) ? page.items : [];
-            if (!items.length) break;
-            for (const item of items) {
-                if (tracks.length >= 50) break;
-                const tr = item?.track ?? null;
-                const name = String(tr?.name ?? '').trim();
-                const artists = Array.isArray(tr?.artists) ? tr.artists.map((a) => a?.name) : [];
-                const query = buildSpotifyQueryFromTrackMeta({ name, artists });
-                if (!query) continue;
-                const found = await youtubeSearchFirstUrl(query);
-                if (!found) continue;
-                tracks.push({ url: found.url, title: name || found.title, requestedById, source: 'Spotify', guildName });
-            }
-            offset += items.length;
-            if (items.length < limit) break;
-        }
-        if (!tracks.length) throw new Error('SPOTIFY_SEM_RESULTADO');
-        return tracks;
-    }
-
-    throw new Error('LINK_NAO_SUPORTADO');
-}
-
 function parseStyles(raw) {
     const text = String(raw ?? '').trim();
     if (!text) return [];
@@ -1255,11 +1074,11 @@ function buildMusicPanelEmbed(guild) {
         .setDescription(
             [
                 '━━━━━━━━━━━━━━━━━━━━',
-                'Use os botões e menus abaixo para tocar música na sala de voz.',
+                'Use o painel abaixo para tocar música na sala de voz.',
                 '',
                 '📌 Como usar:',
                 '• Entre em uma sala de voz',
-                '• Use "Adicionar Link" para colar um link do YouTube/playlist',
+                '• Use "Play" para colar um link do YouTube/playlist ou escrever o nome da música',
                 '• Ou escolha um estilo e uma música no menu',
                 '',
                 '⚠️ Dica: links de busca do YouTube (/results?search_query=...) também funcionam.',
@@ -1272,18 +1091,19 @@ function buildMusicPanelEmbed(guild) {
 
 function buildMusicPanelComponents() {
     const rowMain = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('musicpanel_addlink').setLabel('Adicionar Link').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('musicpanel_mix').setLabel('Mix').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('musicpanel_addlink').setLabel('Play').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('musicpanel_nowplaying').setLabel('Tocando').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('musicpanel_queue').setLabel('Fila').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('musicpanel_lista').setLabel('Lista').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('musicpanel_history').setLabel('Playlist').setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId('musicpanel_shuffle').setLabel('Shuffle').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('musicpanel_loop').setLabel('Loop').setStyle(ButtonStyle.Secondary)
     );
 
     const rowControls = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('musicpanel_pause').setLabel('Pausar').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('musicpanel_resume').setLabel('Retomar').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('musicpanel_skip').setLabel('Pular').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('musicpanel_stop').setLabel('Parar').setStyle(ButtonStyle.Danger)
+        new ButtonBuilder().setCustomId('musicpanel_stop').setLabel('Parar').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('musicpanel_volume').setLabel('Volume').setStyle(ButtonStyle.Secondary)
     );
 
     const categoryOptions = [
@@ -1312,7 +1132,12 @@ function buildMusicPanelComponents() {
         .addOptions(categoryOptions);
 
     const rowCategory = new ActionRowBuilder().addComponents(categoryMenu);
-    return [rowMain, rowControls, rowCategory];
+    const rowLibrary = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('musicpanel_mix').setLabel('Mix').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('musicpanel_lista').setLabel('Lista').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('musicpanel_history').setLabel('Playlist').setStyle(ButtonStyle.Secondary)
+    );
+    return [rowMain, rowControls, rowCategory, rowLibrary];
 }
 
 async function ensureMusicPanelInChannel(channel) {
@@ -2036,10 +1861,10 @@ async function connectToVoice({ guild, voiceChannel }) {
 }
 
 async function enqueueFromLink({ link, requestedById, guildName }) {
-    const resolved = await resolveFinalUrlIfShort(link);
+    const resolved = String(link ?? '').trim();
     const type = playdl.validate(resolved);
     if (!type) {
-        const q = parseYouTubeSearchQueryFromUrl(resolved);
+        const q = parseYouTubeSearchQueryFromUrl(resolved) ?? resolved;
         if (!q) throw new Error('LINK_INVALIDO');
         const found = await youtubeSearchFirstUrl(q);
         if (!found) throw new Error('LINK_INVALIDO');
@@ -2082,22 +1907,11 @@ async function enqueueFromLink({ link, requestedById, guildName }) {
         ];
     }
 
-    if (type === 'sp_track' || type === 'sp_playlist' || type === 'sp_album') {
-        return await resolveSpotifyToTracks(resolved, requestedById, guildName);
-    }
-
     throw new Error('LINK_NAO_SUPORTADO');
 }
 
 async function createAudioResourceFromTrack(track) {
     let url = track.url;
-    const type = playdl.validate(url);
-    if (type === 'sp_track') {
-        const search = await withTimeout(playdl.search(`${track.title} audio`, { limit: 1 }), 15000, 'yt-search-spotify').catch(() => []);
-        const first = search?.[0];
-        if (!first?.url) throw new Error('SPOTIFY_SEM_RESULTADO');
-        url = first.url;
-    }
 
     try {
         const stream = await withTimeout(playdl.stream(url), 30000, 'yt-stream');
@@ -2331,6 +2145,10 @@ client.on('guildMemberRemove', async (member) => {
     } catch (err) {
         logError('Erro no guildMemberRemove', err);
     }
+});
+
+client.on('voiceStateUpdate', (oldState, newState) => {
+    musicManager.handleVoiceStateUpdate(oldState, newState);
 });
 
 client.on('error', (err) => {
@@ -3334,7 +3152,7 @@ client.on('interactionCreate', async (interaction) => {
 
                 const link = interaction.fields.getTextInputValue('musicpanel_link')?.trim() ?? '';
                 if (!link) {
-                    await replyAndDelete(interaction, '❌ Informe o link.');
+                    await replyAndDelete(interaction, '❌ Informe um link ou o nome da música.');
                     return;
                 }
 
@@ -3344,61 +3162,55 @@ client.on('interactionCreate', async (interaction) => {
                     return;
                 }
 
-                await connectToVoice({ guild: interaction.guild, voiceChannel });
+                const ctrl = musicManager.get(interaction.guild.id);
+                ctrl.setTextChannel(interaction.channelId);
+                await ctrl.ensureConnection(voiceChannel);
 
-                const tracks = await enqueueFromLink({
-                    link,
-                    requestedById: interaction.user.id,
-                    guildName: interaction.guild.name
-                });
+                const tracks = await ctrl.enqueue(link, { requestedById: interaction.user.id });
+                await ctrl.playNext();
 
-                const music = getMusicState(interaction.guild.id);
-                music.queue.push(...tracks);
-                if (music.player.state.status === AudioPlayerStatus.Idle && !music.current) {
-                    await playNextInGuild(interaction.guild.id);
-                }
-
-                const warn = !music.current && music.lastError ? `\n⚠️ Não tocou: ${music.lastError}` : '';
-                await replyAndDelete(interaction, `▶️ Adicionado na fila: ${tracks.length} item(ns).${warn}`);
+                await replyAndDelete(interaction, `▶️ Adicionado na fila: ${tracks.length} item(ns).`);
             } catch (err) {
                 const code = String(err?.message ?? '');
-                if (code === 'SEM_PERMISSAO_VOICE') {
-                    await replyAndDelete(interaction, '❌ Sem permissão para conectar/falar nessa sala de voz.');
+                const isTimeout = typeof err?.message === 'string' && err.message.startsWith('Timeout:');
+                if (isTimeout) {
+                    await replyAndDelete(interaction, '⏳ O YouTube demorou para responder. Tente novamente.');
                     return;
                 }
-                if (code === 'SALA_CHEIA') {
-                    await replyAndDelete(interaction, '❌ A sala de voz está cheia (limite de usuários).');
+                if (code === 'QUERY_VAZIA') {
+                    await replyAndDelete(interaction, '❌ Informe um link ou nome da música.');
                     return;
                 }
-                if (code === 'VOICE_TIMEOUT') {
-                    await replyAndDelete(interaction, getVoiceTimeoutHelp());
+                if (code === 'NAO_ENCONTRADO') {
+                    await replyAndDelete(interaction, '❌ Não encontrei resultados para essa busca.');
                     return;
                 }
-                if (code === 'LINK_INVALIDO') {
-                    await replyAndDelete(interaction, '❌ Link inválido.');
-                    return;
-                }
-                if (code === 'LINK_NAO_SUPORTADO') {
-                    await replyAndDelete(interaction, '❌ Link não suportado. Use vídeo/playlist do YouTube (ou Spotify).');
-                    return;
-                }
-                if (code === 'SPOTIFY_PRECISA_CREDENCIAIS') {
-                    await replyAndDelete(
-                        interaction,
-                        '❌ Spotify: para tocar playlist/album é necessário configurar SPOTIFY_CLIENT_ID e SPOTIFY_CLIENT_SECRET.\nTrack individual funciona sem isso.'
-                    );
-                    return;
-                }
-                if (code === 'SPOTIFY_API_FALHOU') {
-                    await replyAndDelete(interaction, '❌ Spotify: não consegui buscar os dados agora. Tente novamente.');
-                    return;
-                }
-                if (code === 'SPOTIFY_SEM_RESULTADO') {
-                    await replyAndDelete(interaction, '❌ Spotify: não achei um resultado no YouTube para essa música.');
+                if (code === 'TIPO_NAO_SUPORTADO') {
+                    await replyAndDelete(interaction, '❌ Link não suportado. Use vídeo/playlist do YouTube ou nome da música.');
                     return;
                 }
                 logError('Erro no modal musicpanel_addlink_modal', err);
                 await replyAndDelete(interaction, '❌ Erro ao adicionar o link. Tente novamente.');
+            }
+            return;
+        }
+
+        if (interaction.customId === 'musicpanel_volume_modal') {
+            try {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+                if (!(await ensureCanPlayNow(interaction))) return;
+                const raw = interaction.fields.getTextInputValue('musicpanel_volume_value')?.trim() ?? '';
+                const value = Number(raw);
+                if (!Number.isFinite(value)) {
+                    await replyAndDelete(interaction, '❌ Informe um número válido (0 a 200).');
+                    return;
+                }
+                const ctrl = musicManager.get(interaction.guild.id);
+                const vol = ctrl.setVolumePercent(value);
+                await replyAndDelete(interaction, `🔊 Volume ajustado: ${vol}%`);
+            } catch (err) {
+                logError('Erro no modal musicpanel_volume_modal', err);
+                await replyAndDelete(interaction, '❌ Erro ao ajustar volume.');
             }
             return;
         }
@@ -3990,9 +3802,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isChatInputCommand()) {
-        const supportedCommands = new Set([
-            'paineladm'
-        ]);
+        const supportedCommands = new Set(['paineladm', ...musicSlashByName.keys()]);
         if (!supportedCommands.has(interaction.commandName)) return;
 
         try {
@@ -4048,6 +3858,12 @@ client.on('interactionCreate', async (interaction) => {
                     logError('Erro no /paineladm', err);
                     await replyAndDelete(interaction, '❌ Erro ao enviar o Painel Central. Veja o console.');
                 }
+                return;
+            }
+
+            const musicCmd = musicSlashByName.get(interaction.commandName) ?? null;
+            if (musicCmd) {
+                await musicCmd.execute(interaction, { musicManager, ensureCanPlayNow, replyAndDelete });
                 return;
             }
 
@@ -4785,27 +4601,6 @@ client.on('interactionCreate', async (interaction) => {
                 return;
             }
 
-            try {
-                await connectToVoice({ guild: interaction.guild, voiceChannel });
-            } catch (err) {
-                const code = String(err?.message ?? '');
-                if (code === 'SEM_PERMISSAO_VOICE') {
-                    await interaction.editReply('❌ Sem permissão para conectar/falar nessa sala de voz.').catch(() => {});
-                    return;
-                }
-                if (code === 'SALA_CHEIA') {
-                    await interaction.editReply('❌ A sala de voz está cheia (limite de usuários).').catch(() => {});
-                    return;
-                }
-                if (code === 'VOICE_TIMEOUT') {
-                    await interaction.editReply(getVoiceTimeoutHelp()).catch(() => {});
-                    return;
-                }
-                logError('Falha ao entrar na sala de voz (musicpanel)', err);
-                await interaction.editReply('❌ Não consegui entrar na sala de voz.').catch(() => {});
-                return;
-            }
-
             const found = await youtubeSearchFirstUrl(item.query);
             if (!found) {
                 await interaction.editReply('⚠️ Não consegui buscar no YouTube agora. Tente novamente ou use um link direto do vídeo.').catch(() => {});
@@ -4820,11 +4615,11 @@ client.on('interactionCreate', async (interaction) => {
                 guildName: interaction.guild.name
             };
 
-            const music = getMusicState(interaction.guild.id);
-            music.queue.push(track);
-            if (music.player.state.status === AudioPlayerStatus.Idle && !music.current) {
-                await playNextInGuild(interaction.guild.id);
-            }
+            const ctrl = musicManager.get(interaction.guild.id);
+            ctrl.setTextChannel(interaction.channelId);
+            await ctrl.ensureConnection(voiceChannel);
+            ctrl.queue.push({ url: track.url, title: track.title, requestedById: track.requestedById });
+            await ctrl.playNext();
 
             await interaction.editReply(`✅ Adicionado na fila: ${normalizeTitleForList(track.title)}`).catch(() => {});
             return;
@@ -4860,27 +4655,6 @@ client.on('interactionCreate', async (interaction) => {
             return;
         }
 
-        try {
-            await connectToVoice({ guild: interaction.guild, voiceChannel });
-        } catch (err) {
-            const code = String(err?.message ?? '');
-            if (code === 'SEM_PERMISSAO_VOICE') {
-                await interaction.editReply('❌ Sem permissão para conectar/falar nessa sala de voz.').catch(() => {});
-                return;
-            }
-                if (code === 'SALA_CHEIA') {
-                    await interaction.editReply('❌ A sala de voz está cheia (limite de usuários).').catch(() => {});
-                    return;
-                }
-            if (code === 'VOICE_TIMEOUT') {
-                    await interaction.editReply(getVoiceTimeoutHelp()).catch(() => {});
-                return;
-            }
-            logError('Falha ao entrar na sala de voz (playlist)', err);
-            await interaction.editReply('❌ Não consegui entrar na sala de voz.').catch(() => {});
-            return;
-        }
-
         const track = {
             url: entry.url,
             title: entry.title || 'Sem título',
@@ -4889,11 +4663,11 @@ client.on('interactionCreate', async (interaction) => {
             guildName: interaction.guild.name
         };
 
-        const music = getMusicState(interaction.guild.id);
-        music.queue.push(track);
-        if (music.player.state.status === AudioPlayerStatus.Idle && !music.current) {
-            await playNextInGuild(interaction.guild.id);
-        }
+        const ctrl = musicManager.get(interaction.guild.id);
+        ctrl.setTextChannel(interaction.channelId);
+        await ctrl.ensureConnection(voiceChannel);
+        ctrl.queue.push({ url: track.url, title: track.title, requestedById: track.requestedById });
+        await ctrl.playNext();
 
         await interaction.editReply(`✅ Adicionado na fila: ${normalizeTitleForList(track.title)}`).catch(() => {});
         return;
@@ -5201,7 +4975,7 @@ client.on('interactionCreate', async (interaction) => {
             const modal = new ModalBuilder().setCustomId('musicpanel_addlink_modal').setTitle('Adicionar link de música');
             const input = new TextInputBuilder()
                 .setCustomId('musicpanel_link')
-                .setLabel('Link do YouTube/Spotify (ou /results?search_query=...)')
+                .setLabel('Link do YouTube ou nome da música')
                 .setStyle(TextInputStyle.Short)
                 .setRequired(true)
                 .setMaxLength(2000);
@@ -5224,33 +4998,23 @@ client.on('interactionCreate', async (interaction) => {
                     return;
                 }
 
-                await connectToVoice({ guild: interaction.guild, voiceChannel });
                 const tracks = await buildMixTracks({
                     styles: [],
                     total: 30,
                     requestedById: interaction.user.id,
                     guildName: interaction.guild.name
                 });
-                const music = getMusicState(interaction.guild.id);
-                music.queue.push(...tracks);
-                if (music.player.state.status === AudioPlayerStatus.Idle && !music.current) {
-                    await playNextInGuild(interaction.guild.id);
-                }
+
+                const ctrl = musicManager.get(interaction.guild.id);
+                ctrl.setTextChannel(interaction.channelId);
+                await ctrl.ensureConnection(voiceChannel);
+                ctrl.queue.push(...tracks.map((t) => ({ url: t.url, title: t.title, requestedById: t.requestedById })));
+                await ctrl.playNext();
                 await replyAndDelete(interaction, `🎶 Mix adicionado na fila: ${tracks.length} música(s).`);
             } catch (err) {
-                const code = String(err?.message ?? '');
-                if (code === 'SEM_PERMISSAO_VOICE') {
-                    await interaction.editReply('❌ Sem permissão para conectar/falar nessa sala de voz.').catch(() => {});
-                    scheduleDeleteReply(interaction);
-                    return;
-                }
-                if (code === 'SALA_CHEIA') {
-                    await interaction.editReply('❌ A sala de voz está cheia (limite de usuários).').catch(() => {});
-                    scheduleDeleteReply(interaction);
-                    return;
-                }
-                if (code === 'VOICE_TIMEOUT') {
-                    await interaction.editReply(getVoiceTimeoutHelp()).catch(() => {});
+                const isTimeout = typeof err?.message === 'string' && err.message.startsWith('Timeout:');
+                if (isTimeout) {
+                    await interaction.editReply('⏳ O YouTube demorou para responder. Tente novamente.').catch(() => {});
                     scheduleDeleteReply(interaction);
                     return;
                 }
@@ -5261,24 +5025,33 @@ client.on('interactionCreate', async (interaction) => {
             return;
         }
 
+        if (id === 'musicpanel_nowplaying') {
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+            const ctrl = musicManager.get(interaction.guild.id);
+            if (!ctrl.current) {
+                await replyAndDelete(interaction, '📭 Nada tocando agora.');
+                return;
+            }
+            await replyAndDelete(interaction, `🎶 Tocando agora: ${ctrl.current.title}\n${ctrl.current.url}`);
+            return;
+        }
+
         if (id === 'musicpanel_queue') {
             await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-            const music = musicByGuildId.get(interaction.guild.id);
-            if (!music?.current && (!music?.queue || music.queue.length === 0)) {
-                const extra = music?.lastError ? `\n⚠️ Último erro: ${music.lastError}` : '';
-                await replyAndDelete(interaction, `📭 Fila vazia.${extra}`);
+            const ctrl = musicManager.get(interaction.guild.id);
+            if (!ctrl.current && ctrl.queue.length === 0) {
+                await replyAndDelete(interaction, '📭 Fila vazia.');
                 return;
             }
 
             const lines = [];
-            if (music.lastError) lines.push(`⚠️ Último erro: ${music.lastError}`);
-            if (music.current) lines.push(`🎶 Tocando agora: ${music.current.title}`);
-            const upcoming = (music.queue ?? []).slice(0, 10);
+            if (ctrl.current) lines.push(`🎶 Tocando agora: ${ctrl.current.title}`);
+            const upcoming = (ctrl.queue ?? []).slice(0, 10);
             if (upcoming.length) {
                 lines.push('🗒️ Próximas:');
                 for (let i = 0; i < upcoming.length; i++) lines.push(`${i + 1}. ${upcoming[i].title}`);
             }
-            if ((music.queue?.length ?? 0) > 10) lines.push(`… e mais ${music.queue.length - 10} na fila`);
+            if ((ctrl.queue?.length ?? 0) > 10) lines.push(`… e mais ${ctrl.queue.length - 10} na fila`);
             await replyAndDelete(interaction, lines.join('\n'));
             return;
         }
@@ -5351,42 +5124,70 @@ client.on('interactionCreate', async (interaction) => {
             return;
         }
 
+        if (id === 'musicpanel_shuffle') {
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+            const ctrl = musicManager.get(interaction.guild.id);
+            if (ctrl.queue.length < 2) {
+                await replyAndDelete(interaction, '⚠️ Fila pequena demais para shuffle.');
+                return;
+            }
+            ctrl.shuffleQueue();
+            await replyAndDelete(interaction, '🔀 Fila embaralhada.');
+            return;
+        }
+
+        if (id === 'musicpanel_loop') {
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+            const ctrl = musicManager.get(interaction.guild.id);
+            const next =
+                ctrl.loopMode === LOOP.OFF ? LOOP.TRACK : ctrl.loopMode === LOOP.TRACK ? LOOP.QUEUE : LOOP.OFF;
+            ctrl.setLoopMode(next);
+            await replyAndDelete(interaction, `🔁 Loop: ${ctrl.loopMode}`);
+            return;
+        }
+
+        if (id === 'musicpanel_volume') {
+            const modal = new ModalBuilder().setCustomId('musicpanel_volume_modal').setTitle('Volume');
+            const input = new TextInputBuilder()
+                .setCustomId('musicpanel_volume_value')
+                .setLabel('Volume (0 a 200)')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true)
+                .setMaxLength(3);
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+            await interaction.showModal(modal).catch(async (err) => {
+                logError('Falha ao abrir modal musicpanel_volume', err);
+                await interaction.reply({ content: '❌ Não consegui abrir o formulário. Tente novamente.', flags: MessageFlags.Ephemeral }).catch(() => {});
+                scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
+            });
+            return;
+        }
+
         if (id === 'musicpanel_pause' || id === 'musicpanel_resume' || id === 'musicpanel_skip' || id === 'musicpanel_stop') {
             await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-            const music = musicByGuildId.get(interaction.guild.id);
-            if (!music?.current && id !== 'musicpanel_stop') {
+            const ctrl = musicManager.get(interaction.guild.id);
+            if (!ctrl.current && id !== 'musicpanel_stop') {
                 await replyAndDelete(interaction, '⚠️ Não tem música tocando.');
                 return;
             }
 
             if (id === 'musicpanel_pause') {
-                const ok = music.player.pause();
+                const ok = ctrl.pause();
                 await replyAndDelete(interaction, ok ? '⏸️ Pausado.' : '⚠️ Não consegui pausar.');
                 return;
             }
             if (id === 'musicpanel_resume') {
-                const ok = music.player.unpause();
+                const ok = ctrl.resume();
                 await replyAndDelete(interaction, ok ? '▶️ Retomado.' : '⚠️ Não consegui retomar.');
                 return;
             }
             if (id === 'musicpanel_skip') {
-                music.player.stop(true);
+                ctrl.skip();
                 await replyAndDelete(interaction, '⏭️ Pulando...');
                 return;
             }
             if (id === 'musicpanel_stop') {
-                if (music) {
-                    music.queue = [];
-                    music.current = null;
-                    try {
-                        music.player.stop(true);
-                    } catch {}
-                    try {
-                        music.connection?.destroy();
-                    } catch {}
-                    music.connection = null;
-                    music.voiceChannelId = null;
-                }
+                musicManager.destroy(interaction.guild.id);
                 await replyAndDelete(interaction, '⏹️ Música parada e fila limpa.');
                 return;
             }

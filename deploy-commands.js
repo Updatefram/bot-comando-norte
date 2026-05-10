@@ -1,6 +1,7 @@
-const { REST, Routes, SlashCommandBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const config = require('./config.json');
 require('dotenv').config();
+const { commands: musicCommands } = require('./commands/music');
 
 function buildCommands() {
     const paineladm = new SlashCommandBuilder()
@@ -15,7 +16,9 @@ function buildCommands() {
         .setDMPermission(false)
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
 
-    return [paineladm.toJSON()];
+    const list = [paineladm.toJSON()];
+    for (const cmd of musicCommands) list.push(cmd.data.toJSON());
+    return list;
 }
 
 module.exports = { buildCommands };
