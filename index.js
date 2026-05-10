@@ -2928,34 +2928,83 @@ async function trySendDM(user, content) {
     }
 }
 
+function normalizeReplyPayload(content) {
+    if (typeof content === 'string') {
+        return { content };
+    }
+
+    if (content && typeof content === 'object') {
+        return content;
+    }
+
+    return {
+        content: String(content ?? '')
+    };
+}
+
 function scheduleDeleteReply(interaction) {
-    setTimeout(() => {
-        if (!interaction.deferred && !interaction.replied) return;
-        interaction.deleteReply().catch(() => {});
-    }, AUTO_DELETE_MS);
+    scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
 }
 
-function scheduleDeleteReplyMs(interaction, ms) {
+function scheduleDeleteReplyMs(interaction, ms = AUTO_DELETE_MS) {
+    const delay = Number.isFinite(Number(ms)) ? Number(ms) : AUTO_DELETE_MS;
+
     setTimeout(() => {
-        if (!interaction.deferred && !interaction.replied) return;
-        interaction.deleteReply().catch(() => {});
-    }, ms);
+        try {
+            if (!interaction?.deferred && !interaction?.replied) return;
+
+            interaction.deleteReply().catch((err) => {
+                const code = Number(err?.code ?? 0);
+
+                if (code === 10008 || code === 10062) return;
+
+                console.error('Erro ao apagar resposta:', err);
+            });
+        } catch {}
+    }, delay);
 }
 
-function scheduleDeleteWebhookMessage(interaction, messageId, ms) {
-    setTimeout(() => {
-        if (!messageId) return;
-        interaction.webhook?.deleteMessage(messageId).catch(() => {});
-    }, ms);
+async function safeInteractionReply(interaction, content, options = {}) {
+    const payload = normalizeReplyPayload(content);
+
+    if (options.ephemeral !== false) {
+        payload.flags = payload.flags ?? MessageFlags.Ephemeral;
+    }
+
+    try {
+        if (interaction?.deferred || interaction?.replied) {
+            return await interaction.editReply(payload);
+        }
+
+        return await interaction.reply(payload);
+    } catch (err) {
+        const code = Number(err?.code ?? 0);
+
+        if (code === 10062) {
+            console.error('Interação expirada antes da resposta:', interaction?.customId ?? interaction?.commandName ?? 'desconhecida');
+            return null;
+        }
+
+        if (code === 40060) {
+            try {
+                return await interaction.editReply(payload);
+            } catch {
+                return null;
+            }
+        }
+
+        console.error('Erro ao responder interação:', err);
+        return null;
+    }
 }
 
 async function replyAndDelete(interaction, content) {
-    await interaction.editReply(content);
+    await safeInteractionReply(interaction, content);
     scheduleDeleteReply(interaction);
 }
 
-async function replyAndDeleteMs(interaction, content, ms) {
-    await interaction.editReply(content);
+async function replyAndDeleteMs(interaction, content, ms = AUTO_DELETE_MS) {
+    await safeInteractionReply(interaction, content);
     scheduleDeleteReplyMs(interaction, ms);
 }
 
