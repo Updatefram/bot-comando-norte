@@ -7,7 +7,7 @@ const {
     entersState,
     VoiceConnectionStatus
 } = require('@discordjs/voice');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, PermissionFlagsBits, ChannelType } = require('discord.js');
 const { delay } = require('../utils/async');
 const { resolveToTracks, getStream } = require('./youtube');
 
@@ -105,6 +105,20 @@ class GuildMusicController {
     async ensureConnection(voiceChannel) {
         if (this.destroyed) throw new Error('DESTROYED');
 
+        const guild = voiceChannel.guild;
+        const me = guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+        const perms = me ? voiceChannel.permissionsFor(me) : null;
+        const missing = [];
+        if (!perms?.has(PermissionFlagsBits.ViewChannel)) missing.push('Ver Canal');
+        if (!perms?.has(PermissionFlagsBits.Connect)) missing.push('Conectar');
+        if (!perms?.has(PermissionFlagsBits.Speak)) missing.push('Falar');
+        if (missing.length) throw new Error('SEM_PERMISSAO_VOICE');
+
+        const userLimit = Number(voiceChannel.userLimit ?? 0);
+        if (userLimit > 0 && voiceChannel.members?.size >= userLimit && !voiceChannel.members?.has(me?.id ?? '')) {
+            throw new Error('SALA_CHEIA');
+        }
+
         if (this.connection) {
             try {
                 await entersState(this.connection, VoiceConnectionStatus.Ready, 8000);
@@ -129,7 +143,16 @@ class GuildMusicController {
             void this._tryReconnect();
         });
 
-        await entersState(conn, VoiceConnectionStatus.Ready, 15000);
+        try {
+            await entersState(conn, VoiceConnectionStatus.Ready, 15000);
+        } catch {
+            throw new Error('VOICE_TIMEOUT');
+        }
+
+        if (voiceChannel.type === ChannelType.GuildStageVoice && me?.voice) {
+            await me.voice.setSuppressed(false).catch(() => {});
+            await me.voice.setRequestToSpeak(true).catch(() => {});
+        }
     }
 
     async _tryReconnect() {

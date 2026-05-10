@@ -25,17 +25,34 @@ async function resolveToTracks(input, { requestedById }) {
     const raw = String(input ?? '').trim();
     if (!raw) throw new Error('QUERY_VAZIA');
 
-    const type = playdl.validate(raw);
+    let normalized = raw;
+    try {
+        const u = new URL(raw);
+        const host = String(u.hostname || '').toLowerCase();
+        const isYouTubeHost = host === 'www.youtube.com' || host === 'youtube.com' || host === 'm.youtube.com';
+        if (isYouTubeHost && u.pathname === '/watch') {
+            const list = u.searchParams.get('list');
+            if (list && /^\w+/.test(list)) {
+                const playlistUrl = `https://www.youtube.com/playlist?list=${encodeURIComponent(list)}`;
+                const typeFromWatch = playdl.validate(raw);
+                if (typeFromWatch === 'yt_playlist' || typeFromWatch === 'yt_music_playlist') {
+                    normalized = playlistUrl;
+                }
+            }
+        }
+    } catch {}
+
+    const type = playdl.validate(normalized);
     if (!type) {
-        const qFromUrl = parseSearchQueryFromResultsUrl(raw);
-        const q = qFromUrl ?? raw;
+        const qFromUrl = parseSearchQueryFromResultsUrl(normalized);
+        const q = qFromUrl ?? normalized;
         const found = await searchOne(q);
         if (!found) throw new Error('NAO_ENCONTRADO');
         return [{ url: found.url, title: found.title, requestedById }];
     }
 
     if (type === 'yt_playlist' || type === 'yt_music_playlist') {
-        const playlist = await withTimeout(playdl.playlist_info(raw, { incomplete: true }), 20000, 'yt-playlist');
+        const playlist = await withTimeout(playdl.playlist_info(normalized, { incomplete: true }), 20000, 'yt-playlist');
         const videos = await withTimeout(playlist.all_videos(), 30000, 'yt-playlist-videos');
         const limited = Array.isArray(videos) ? videos.slice(0, 200) : [];
         if (!limited.length) throw new Error('NAO_ENCONTRADO');
@@ -43,18 +60,25 @@ async function resolveToTracks(input, { requestedById }) {
     }
 
     if (type === 'yt_video' || type === 'yt_short' || type === 'yt_music_video') {
-        const info = await withTimeout(playdl.video_basic_info(raw), 20000, 'yt-video-info');
+        const info = await withTimeout(playdl.video_basic_info(normalized), 20000, 'yt-video-info');
         const title = String(info?.video_details?.title ?? 'Sem título');
-        return [{ url: raw, title, requestedById }];
+        return [{ url: normalized, title, requestedById }];
     }
 
     throw new Error('TIPO_NAO_SUPORTADO');
 }
 
 async function getStream(url) {
-    const s = await withTimeout(playdl.stream(url, { quality: 2 }), 20000, 'yt-stream');
-    if (!s?.stream || !s?.type) throw new Error('STREAM_FALHOU');
-    return s;
+    try {
+        const s = await withTimeout(playdl.stream(url, { quality: 2 }), 20000, 'yt-stream');
+        if (!s?.stream || !s?.type) throw new Error('STREAM_FALHOU');
+        return s;
+    } catch (err) {
+        const info = await withTimeout(playdl.video_info(url), 20000, 'yt-video-info-stream');
+        const s2 = await withTimeout(playdl.stream_from_info(info), 20000, 'yt-stream-from-info');
+        if (!s2?.stream || !s2?.type) throw err;
+        return s2;
+    }
 }
 
 module.exports = { resolveToTracks, getStream };

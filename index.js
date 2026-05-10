@@ -690,6 +690,68 @@ async function handleAdminPanelChannelTargetsFromIds(interaction, action, select
             return;
         }
 
+        if (action === 'imagens_seq') {
+            const pending = pendingAdminActionByUserId.get(interaction.user.id);
+            if (!pending || pending.action !== 'imagens_seq' || !Array.isArray(pending.urls) || !pending.urls.length) {
+                await interaction.update({ content: '⚠️ Ação expirada. Abra o formulário novamente.', components: [] }).catch(() => {});
+                scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
+                return;
+            }
+
+            const urls = pending.urls;
+            const titulo = String(pending.title ?? '').trim();
+            const mensagem = String(pending.mensagem ?? '').trim();
+            pendingAdminActionByUserId.delete(interaction.user.id);
+
+            await interaction.update({ content: '⏳ Enviando imagens...', components: [] }).catch(() => {});
+
+            const delayMs = async (ms) => {
+                await new Promise((r) => setTimeout(r, ms));
+            };
+
+            const reportOk = [];
+            const reportFail = [];
+
+            for (const ch of targets) {
+                let sentCount = 0;
+                try {
+                    for (let i = 0; i < urls.length; i++) {
+                        const url = urls[i];
+                        const baseTitle = titulo ? titulo.slice(0, 180) : '🖼️ Imagens';
+                        const embed = new EmbedBuilder()
+                            .setColor(0x111827)
+                            .setTitle(`${baseTitle} (${i + 1}/${urls.length})`)
+                            .setImage(url);
+                        if (i === 0 && mensagem) embed.setDescription(mensagem.slice(0, 3900));
+                        applyGuildBranding(embed, guild);
+                        await ch.send({ embeds: [embed] });
+                        sentCount++;
+                        if (i < urls.length - 1) await delayMs(650);
+                    }
+                    reportOk.push(`${ch.id}:${sentCount}`);
+                } catch {
+                    reportFail.push(`${ch.id}:${sentCount}`);
+                }
+            }
+
+            const okText = reportOk.length
+                ? reportOk.map((x) => {
+                      const [id, count] = String(x).split(':');
+                      return `<#${id}> (${count})`;
+                  }).join(', ')
+                : '—';
+            const failText = reportFail.length
+                ? reportFail.map((x) => {
+                      const [id, count] = String(x).split(':');
+                      return `<#${id}> (${count})`;
+                  }).join(', ')
+                : '';
+            const msg = `🖼️ Imagens sequenciais enviadas.\nSucesso: ${okText}${failText ? `\nFalhou: ${failText}` : ''}\nTotal: ${urls.length} imagem(ns).`;
+            await interaction.editReply({ content: msg, components: [] }).catch(() => {});
+            scheduleDeleteReplyMs(interaction, 60000);
+            return;
+        }
+
         if (action === 'metas') {
             const pending = pendingAdminActionByUserId.get(interaction.user.id);
             if (!pending || pending.action !== 'metas' || !String(pending.mensagem ?? '').trim()) {
@@ -1266,6 +1328,7 @@ function buildAdminPanelComponents() {
             { label: 'Cargos (Adicionar/Remover)', value: 'adminpanel_cargos', emoji: '🎭' },
             { label: 'Metas', value: 'adminpanel_metas', emoji: '🎯' },
             { label: 'Regras', value: 'adminpanel_regras', emoji: '📜' },
+            { label: 'Imagens Sequenciais', value: 'adminpanel_imagens_seq', emoji: '🖼️' },
             { label: 'Rádio da Fac', value: 'adminpanel_radio', emoji: '📻' },
             { label: 'Aviso em Canais', value: 'adminpanel_avisocanais', emoji: '📢' },
             { label: 'Aviso para User', value: 'adminpanel_avisouser', emoji: '👤' },
@@ -1354,6 +1417,38 @@ async function runAdminPanelAction(interaction, id) {
             await interaction.editReply('❌ Erro ao exportar IDs. Veja o console.').catch(() => {});
             scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
         }
+        return;
+    }
+
+    if (id === 'adminpanel_imagens_seq') {
+        const modal = new ModalBuilder().setCustomId('adminpanel_imagens_seq_modal').setTitle('Imagens Sequenciais');
+        const inputTitle = new TextInputBuilder()
+            .setCustomId('adminpanel_imagens_seq_title')
+            .setLabel('Título (opcional)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+            .setMaxLength(120);
+        const inputMsg = new TextInputBuilder()
+            .setCustomId('adminpanel_imagens_seq_msg')
+            .setLabel('Mensagem (opcional) — aparece na 1ª imagem')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(false)
+            .setMaxLength(1500);
+        const inputUrls = new TextInputBuilder()
+            .setCustomId('adminpanel_imagens_seq_urls')
+            .setLabel('Links das imagens (1 por linha)')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setMaxLength(1900);
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(inputTitle),
+            new ActionRowBuilder().addComponents(inputMsg),
+            new ActionRowBuilder().addComponents(inputUrls)
+        );
+        await interaction.showModal(modal).catch(async () => {
+            await interaction.reply({ content: '❌ Não consegui abrir o formulário. Tente novamente.', flags: MessageFlags.Ephemeral }).catch(() => {});
+            scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
+        });
         return;
     }
 
@@ -3211,6 +3306,59 @@ client.on('interactionCreate', async (interaction) => {
             } catch (err) {
                 logError('Erro no modal musicpanel_volume_modal', err);
                 await replyAndDelete(interaction, '❌ Erro ao ajustar volume.');
+            }
+            return;
+        }
+
+        if (interaction.customId === 'adminpanel_imagens_seq_modal') {
+            try {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+                if (interaction.channelId !== getAdminPanelChannelId()) {
+                    await replyAndDelete(interaction, `❌ Use apenas no canal <#${getAdminPanelChannelId()}>.`);
+                    return;
+                }
+                if (!canUseCommands(interaction.member)) {
+                    await replyAndDelete(interaction, '❌ Você não tem permissão.');
+                    return;
+                }
+
+                const title = interaction.fields.getTextInputValue('adminpanel_imagens_seq_title')?.trim() ?? '';
+                const mensagem = interaction.fields.getTextInputValue('adminpanel_imagens_seq_msg')?.trim() ?? '';
+                const raw = interaction.fields.getTextInputValue('adminpanel_imagens_seq_urls')?.trim() ?? '';
+
+                const matches = raw.match(/https?:\/\/\S+/gi) ?? [];
+                const urls = matches
+                    .map((u) => String(u).trim().replace(/^<+/, '').replace(/>+$/, ''))
+                    .filter((u) => /^https?:\/\/\S+$/i.test(u));
+
+                const unique = Array.from(new Set(urls)).slice(0, 15);
+                if (!unique.length) {
+                    await replyAndDelete(interaction, '❌ Informe pelo menos 1 link de imagem (http/https).');
+                    return;
+                }
+
+                pendingAdminActionByUserId.set(interaction.user.id, {
+                    action: 'imagens_seq',
+                    title,
+                    mensagem,
+                    urls: unique
+                });
+
+                const components = await buildAdminPickerCategoryComponents({
+                    guild: interaction.guild,
+                    action: 'imagens_seq',
+                    ownerId: interaction.user.id,
+                    page: 0,
+                    maxValues: 1
+                });
+                await interaction.editReply({
+                    content: `Selecione a categoria (ou Todos) para escolher o canal.\nImagens: ${unique.length}/15`,
+                    components
+                });
+                scheduleDeleteReplyMs(interaction, 60000);
+            } catch (err) {
+                logError('Erro no adminpanel_imagens_seq_modal', err);
+                await replyAndDelete(interaction, '❌ Erro ao preparar imagens sequenciais.');
             }
             return;
         }
