@@ -5236,20 +5236,35 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (id.startsWith(MUSIC_PANEL_CUSTOM_PREFIX)) {
-        if (id === 'musicpanel_addlink') {
-    const modal = new ModalBuilder().setCustomId('musicpanel_addlink_modal').setTitle('Adicionar link de música');
-    const input = new TextInputBuilder()
-        .setCustomId('musicpanel_link')
-        .setLabel('Link do YouTube ou nome da música')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setMaxLength(2000);
-    modal.addComponents(new ActionRowBuilder().addComponents(input));
-    await interaction.showModal(modal).catch(async (err) => {
+      if (id === 'musicpanel_addlink') {
+    try {
+        if (interaction.replied || interaction.deferred) return;
+
+        const modal = new ModalBuilder()
+            .setCustomId('musicpanel_addlink_modal')
+            .setTitle('Adicionar link de música');
+
+        const input = new TextInputBuilder()
+            .setCustomId('musicpanel_link')
+            .setLabel('Link do YouTube ou nome da música')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+            .setMaxLength(2000);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+
+        await interaction.showModal(modal);
+    } catch (err) {
+        const code = Number(err?.code ?? err?.rawError?.code ?? 0);
+
+        if (code === 10062 || code === 40060) {
+            console.log('Interação do botão musicpanel_addlink expirou ou já foi respondida.');
+            return;
+        }
+
         logError('Falha ao abrir modal musicpanel_addlink', err);
-        await interaction.reply({ content: '❌ Não consegui abrir o formulário. Tente novamente.', flags: MessageFlags.Ephemeral }).catch(() => {});
-        scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
-    });
+    }
+
     return;
 }
 
