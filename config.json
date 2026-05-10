@@ -1,0 +1,67 @@
+{
+  "token": "",
+  "clientId": "1495050753994129539",
+  "guildId": "1336078347305746462",
+  "cargoVerificadoId": "1501710005974470697",
+  "cargoMembroId": "1336078347305746467",
+  "cargoVisitanteId": "1344513058621624320",
+  "categoriaVerificacaoId": "1501712992776228925",
+  "canalVerificacaoId": "1501713411325825246",
+  "logVerificacaoId": "1501721974034927676",
+  "adminRoles": [
+    "1336078347322654825",
+    "1336078347322654823",
+    "1336078347322654820",
+    "1466635436557467709"
+  ],
+  "logChannel": "1500911735966662807",
+  "ticket": {
+    "staffRoles": [
+      "1500986539558047886",
+      "1336078347322654825",
+      "1336078347322654823",
+      "1336078347322654820",
+      "1466635436557467709"
+    ],
+    "cooldownSeconds": 120,
+    "logChannel": "1500985763549024256",
+    "categories": {
+      "suporte": {
+        "categoryId": "1336078347893211156",
+        "label": "Suporte",
+        "emoji": "❓",
+        "viewerRoles": [
+          "1500986539558047886"
+        ]
+      },
+      "denuncia": {
+        "categoryId": "1336078347893211156",
+        "label": "Denúncia",
+        "emoji": "🚨",
+        "viewerRoles": [
+          "1500986539558047886"
+        ]
+      }
+    }
+  },
+  "ticketFarm": {
+    "categoryId": "1336078347893211156",
+    "viewerRoles": [
+      "1500986539558047886",
+      "1336078347322654825",
+      "1336078347322654823",
+      "1336078347322654820"
+    ],
+    "adminRoles": [
+      "1500986539558047886"
+    ],
+    "cooldownSeconds": 120,
+    "logChannel": "1501008078513115316"
+  },
+  "setagem": {
+    "approvalChannelId": "1502758945066975262",
+    "listChannelId": "1502759130778046697"
+  },
+  "adminPanelChannelId": "1502808029790339173",
+  "adminPanelMessageId": "1502819370378985583"
+}
