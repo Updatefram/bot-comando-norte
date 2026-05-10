@@ -3252,6 +3252,7 @@ async function sendTicketLog({ guild, channel, openerId, closerId, claimedById, 
 }
 
 client.on('interactionCreate', async (interaction) => {
+    try {
     if (interaction.isModalSubmit()) {
         if (interaction.customId === 'verificar_idade_modal') {
             try {
@@ -5200,12 +5201,13 @@ client.on('interactionCreate', async (interaction) => {
             const modal = new ModalBuilder().setCustomId('musicpanel_addlink_modal').setTitle('Adicionar link de música');
             const input = new TextInputBuilder()
                 .setCustomId('musicpanel_link')
-                .setLabel('Link do YouTube/playlist (ou /results?search_query=...)')
+                .setLabel('Link do YouTube/Spotify (ou /results?search_query=...)')
                 .setStyle(TextInputStyle.Short)
                 .setRequired(true)
                 .setMaxLength(2000);
             modal.addComponents(new ActionRowBuilder().addComponents(input));
-            await interaction.showModal(modal).catch(async () => {
+            await interaction.showModal(modal).catch(async (err) => {
+                logError('Falha ao abrir modal musicpanel_addlink', err);
                 await interaction.reply({ content: '❌ Não consegui abrir o formulário. Tente novamente.', flags: MessageFlags.Ephemeral }).catch(() => {});
                 scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
             });
@@ -6214,6 +6216,17 @@ client.on('interactionCreate', async (interaction) => {
             : '❌ Erro ao processar a ação. Veja o console do bot.';
 
         await replyAndDelete(interaction, message);
+    }
+    } catch (err) {
+        logError('Erro não tratado no interactionCreate', err);
+        if (!interaction?.isRepliable?.()) return;
+        const content = '❌ Erro interno ao processar sua ação. Tente novamente.';
+        if (!interaction.deferred && !interaction.replied) {
+            await interaction.reply({ content, flags: MessageFlags.Ephemeral }).catch(() => {});
+            scheduleDeleteReplyMs(interaction, AUTO_DELETE_MS);
+            return;
+        }
+        await interaction.followUp({ content, flags: MessageFlags.Ephemeral }).catch(() => {});
     }
 });
 
