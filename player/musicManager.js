@@ -123,7 +123,12 @@ class GuildMusicController {
             try {
                 await entersState(this.connection, VoiceConnectionStatus.Ready, 8000);
                 return;
-            } catch {}
+            } catch {
+                try {
+                    this.connection.destroy();
+                } catch {}
+                this.connection = null;
+            }
         }
 
         const conn = joinVoiceChannel({

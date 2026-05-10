@@ -9,74 +9,86 @@ async function searchOne(query) {
     return { url, title: String(first?.title ?? 'Sem título') };
 }
 
-function parseSearchQueryFromResultsUrl(url) {
+function extractYoutubeSearchQuery(rawUrl) {
     try {
-        const u = new URL(String(url));
-        if (u.hostname !== 'www.youtube.com' && u.hostname !== 'youtube.com') return null;
+        const u = new URL(String(rawUrl));
+        const host = u.hostname.toLowerCase().replace(/^www\./, '');
+        if (!host.endsWith('youtube.com')) return null;
         if (u.pathname !== '/results') return null;
         const q = u.searchParams.get('search_query');
-        return q ? String(q) : null;
+        return q ? String(q).trim() : null;
     } catch {
         return null;
     }
+}
+
+function normalizeYoutubeInput(raw) {
+    const text = String(raw ?? '').trim();
+    try {
+        const u = new URL(text);
+        const host = u.hostname.toLowerCase().replace(/^www\./, '');
+        const pathname = u.pathname || '/';
+
+        if (host === 'youtu.be') {
+            const id = pathname.replace(/^\/+/, '').split('/')[0];
+            if (id) return `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+        }
+
+        if (host === 'youtube.com' || host === 'm.youtube.com' || host === 'music.youtube.com' || host === 'youtube-nocookie.com') {
+            if (pathname.startsWith('/shorts/')) {
+                const id = pathname.split('/')[2] || pathname.split('/')[1];
+                if (id) return `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+            }
+            if (pathname.startsWith('/embed/')) {
+                const id = pathname.split('/')[2] || pathname.split('/')[1];
+                if (id) return `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+            }
+            if (pathname === '/watch') {
+                const v = u.searchParams.get('v');
+                const list = u.searchParams.get('list');
+                if (list && list !== 'WL' && /^\w+/.test(list)) {
+                    return `https://www.youtube.com/playlist?list=${encodeURIComponent(list)}`;
+                }
+                if (v) return `https://www.youtube.com/watch?v=${encodeURIComponent(v)}`;
+            }
+            if (pathname === '/playlist') {
+                const list = u.searchParams.get('list');
+                if (list && /^\w+/.test(list)) return `https://www.youtube.com/playlist?list=${encodeURIComponent(list)}`;
+            }
+            if (pathname === '/results') {
+                const query = u.searchParams.get('search_query');
+                if (query) return `search:${String(query).trim()}`;
+            }
+        }
+    } catch {
+        // Input is not a full URL, treat as plain search text.
+    }
+    return text;
 }
 
 async function resolveToTracks(input, { requestedById }) {
     const raw = String(input ?? '').trim();
     if (!raw) throw new Error('QUERY_VAZIA');
 
-    let normalized = raw;
-    let prefetchedPlaylist = null;
-    try {
-        const u = new URL(raw);
-        const host = String(u.hostname || '').toLowerCase();
-        const isYouTubeHost =
-            host === 'www.youtube.com' ||
-            host === 'youtube.com' ||
-            host === 'm.youtube.com' ||
-            host === 'music.youtube.com';
-        const isShortHost = host === 'youtu.be';
+    let normalized = normalizeYoutubeInput(raw);
+    let isSearchQuery = false;
+    if (typeof normalized === 'string' && normalized.startsWith('search:')) {
+        normalized = normalized.slice(7).trim();
+        isSearchQuery = true;
+    }
 
-        if (isShortHost) {
-            const id = String(u.pathname || '').replace(/^\/+/, '').split('/')[0];
-            if (id) normalized = `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
-        }
+    if (!normalized) throw new Error('QUERY_VAZIA');
 
-        if (isYouTubeHost && u.pathname === '/watch') {
-            const v = u.searchParams.get('v');
-            const list = u.searchParams.get('list');
-            if (list && list !== 'WL' && /^\w+/.test(list)) {
-                const playlistUrl = `https://www.youtube.com/playlist?list=${encodeURIComponent(list)}`;
-                const info = await withTimeout(playdl.playlist_info(playlistUrl, { incomplete: true }), 8000, 'yt-playlist-detect').catch(
-                    () => null
-                );
-                if (info) {
-                    prefetchedPlaylist = info;
-                    normalized = playlistUrl;
-                } else if (v) {
-                    normalized = `https://www.youtube.com/watch?v=${encodeURIComponent(v)}`;
-                }
-            } else if (v) {
-                normalized = `https://www.youtube.com/watch?v=${encodeURIComponent(v)}`;
-            }
-        } else if (isYouTubeHost && u.pathname === '/playlist') {
-            const list = u.searchParams.get('list');
-            if (list && /^\w+/.test(list)) normalized = `https://www.youtube.com/playlist?list=${encodeURIComponent(list)}`;
-        }
-    } catch {}
-
-    const type = playdl.validate(normalized);
+    const type = !isSearchQuery ? playdl.validate(normalized) : null;
     if (!type) {
-        const qFromUrl = parseSearchQueryFromResultsUrl(normalized);
-        const q = qFromUrl ?? normalized;
-        const found = await searchOne(q);
+        const searchText = extractYoutubeSearchQuery(normalized) ?? normalized;
+        const found = await searchOne(searchText);
         if (!found) throw new Error('NAO_ENCONTRADO');
         return [{ url: found.url, title: found.title, requestedById }];
     }
 
     if (type === 'yt_playlist' || type === 'yt_music_playlist') {
-        const playlist =
-            prefetchedPlaylist && String(prefetchedPlaylist?.url ?? '') ? prefetchedPlaylist : await withTimeout(playdl.playlist_info(normalized, { incomplete: true }), 20000, 'yt-playlist');
+        const playlist = await withTimeout(playdl.playlist_info(normalized, { incomplete: true }), 20000, 'yt-playlist');
         const videos = await withTimeout(playlist.all_videos(), 30000, 'yt-playlist-videos');
         const limited = Array.isArray(videos) ? videos.slice(0, 200) : [];
         if (!limited.length) throw new Error('NAO_ENCONTRADO');
@@ -89,6 +101,12 @@ async function resolveToTracks(input, { requestedById }) {
         return [{ url: normalized, title, requestedById }];
     }
 
+    if (type === 'yt_search') {
+        const found = await searchOne(normalized);
+        if (!found) throw new Error('NAO_ENCONTRADO');
+        return [{ url: found.url, title: found.title, requestedById }];
+    }
+
     throw new Error('TIPO_NAO_SUPORTADO');
 }
 
@@ -98,10 +116,14 @@ async function getStream(url) {
         if (!s?.stream || !s?.type) throw new Error('STREAM_FALHOU');
         return s;
     } catch (err) {
-        const info = await withTimeout(playdl.video_info(url), 20000, 'yt-video-info-stream');
-        const s2 = await withTimeout(playdl.stream_from_info(info), 20000, 'yt-stream-from-info');
-        if (!s2?.stream || !s2?.type) throw err;
-        return s2;
+        try {
+            const info = await withTimeout(playdl.video_info(url), 20000, 'yt-video-info-stream');
+            const s2 = await withTimeout(playdl.stream_from_info(info), 20000, 'yt-stream-from-info');
+            if (!s2?.stream || !s2?.type) throw new Error('STREAM_FALHOU');
+            return s2;
+        } catch {
+            throw err;
+        }
     }
 }
 
