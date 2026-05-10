@@ -31,6 +31,9 @@ const { buildCommands } = require('./deploy-commands');
 const BOT_TOKEN = String(process.env.TOKEN ?? process.env.DISCORD_TOKEN ?? config.token ?? '').trim();
 const APP_CLIENT_ID = String(process.env.CLIENT_ID ?? config.clientId ?? '').trim();
 const APP_GUILD_ID = String(process.env.GUILD_ID ?? config.guildId ?? '').trim();
+const SPOTIFY_CLIENT_ID = String(process.env.SPOTIFY_CLIENT_ID ?? '').trim();
+const SPOTIFY_CLIENT_SECRET = String(process.env.SPOTIFY_CLIENT_SECRET ?? '').trim();
+const SPOTIFY_MARKET = String(process.env.SPOTIFY_MARKET ?? 'BR').trim().toUpperCase();
 
 let ffmpegPath = null;
 try {
@@ -1004,6 +1007,190 @@ async function youtubeSearchFirstUrl(query) {
     }
 }
 
+let spotifyTokenCache = { accessToken: null, expiresAtMs: 0 };
+
+async function spotifyFetchAccessToken() {
+    if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) return null;
+    const now = Date.now();
+    if (spotifyTokenCache.accessToken && spotifyTokenCache.expiresAtMs - now > 30000) return spotifyTokenCache.accessToken;
+
+    const basic = Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`, 'utf8').toString('base64');
+    const body = new URLSearchParams({ grant_type: 'client_credentials' });
+    const res = await withTimeout(
+        fetch('https://accounts.spotify.com/api/token', {
+            method: 'POST',
+            headers: { Authorization: `Basic ${basic}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+            body
+        }),
+        15000,
+        'spotify-token'
+    ).catch(() => null);
+    if (!res || !res.ok) return null;
+    const json = await res.json().catch(() => null);
+    const token = String(json?.access_token ?? '').trim();
+    const expiresIn = Number(json?.expires_in ?? 0);
+    if (!token || !Number.isFinite(expiresIn) || expiresIn <= 0) return null;
+    spotifyTokenCache = { accessToken: token, expiresAtMs: now + expiresIn * 1000 };
+    return token;
+}
+
+function parseSpotifyIdFromUrl(url) {
+    try {
+        const u = new URL(String(url));
+        const host = String(u.hostname || '').toLowerCase();
+        const pathParts = String(u.pathname || '')
+            .split('/')
+            .map((p) => p.trim())
+            .filter(Boolean);
+        if (!host.endsWith('spotify.com')) return null;
+        const kind = pathParts[0] ?? '';
+        const id = pathParts[1] ?? '';
+        if (!id) return null;
+        if (kind === 'track' || kind === 'playlist' || kind === 'album') return { kind, id };
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+async function resolveFinalUrlIfShort(link) {
+    const raw = String(link ?? '').trim();
+    if (!raw) return raw;
+    try {
+        const u = new URL(raw);
+        const host = String(u.hostname || '').toLowerCase();
+        const isShort = host.endsWith('spotify.link') || host === 'spoti.fi';
+        if (!isShort) return raw;
+        const res = await withTimeout(fetch(raw, { method: 'GET', redirect: 'follow' }), 15000, 'spotify-redirect').catch(() => null);
+        return res?.url ? String(res.url) : raw;
+    } catch {
+        return raw;
+    }
+}
+
+async function spotifyApiGet(pathname, query = {}) {
+    const token = await spotifyFetchAccessToken();
+    if (!token) throw new Error('SPOTIFY_PRECISA_CREDENCIAIS');
+    const u = new URL(`https://api.spotify.com${pathname}`);
+    for (const [k, v] of Object.entries(query ?? {})) {
+        if (v === undefined || v === null) continue;
+        u.searchParams.set(k, String(v));
+    }
+    const res = await withTimeout(fetch(u.toString(), { headers: { Authorization: `Bearer ${token}` } }), 15000, `spotify-api:${pathname}`).catch(() => null);
+    if (!res || !res.ok) throw new Error('SPOTIFY_API_FALHOU');
+    const json = await res.json().catch(() => null);
+    if (!json) throw new Error('SPOTIFY_API_FALHOU');
+    return json;
+}
+
+async function spotifyOEmbedTitle(link) {
+    const u = new URL('https://open.spotify.com/oembed');
+    u.searchParams.set('url', String(link));
+    const res = await withTimeout(fetch(u.toString()), 15000, 'spotify-oembed').catch(() => null);
+    if (!res || !res.ok) return null;
+    const json = await res.json().catch(() => null);
+    const title = String(json?.title ?? '').trim();
+    return title ? title : null;
+}
+
+function buildSpotifyQueryFromTrackMeta({ name, artists }) {
+    const n = String(name ?? '').trim();
+    const a = Array.isArray(artists) ? artists.map((x) => String(x ?? '').trim()).filter(Boolean) : [];
+    const joined = [n, ...a].filter(Boolean).join(' ');
+    return joined ? `${joined} audio` : null;
+}
+
+async function resolveSpotifyToTracks(link, requestedById, guildName) {
+    const normalized = await resolveFinalUrlIfShort(link);
+    const info = parseSpotifyIdFromUrl(normalized);
+    if (!info) throw new Error('LINK_INVALIDO');
+
+    if (info.kind === 'track') {
+        if (SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_SECRET) {
+            const json = await spotifyApiGet(`/v1/tracks/${info.id}`, { market: SPOTIFY_MARKET });
+            const name = String(json?.name ?? '').trim();
+            const artists = Array.isArray(json?.artists) ? json.artists.map((a) => a?.name) : [];
+            const query = buildSpotifyQueryFromTrackMeta({ name, artists });
+            if (!query) throw new Error('SPOTIFY_API_FALHOU');
+            const found = await youtubeSearchFirstUrl(query);
+            if (!found) throw new Error('SPOTIFY_SEM_RESULTADO');
+            return [
+                {
+                    url: found.url,
+                    title: `${name || found.title}`,
+                    requestedById,
+                    source: 'Spotify',
+                    guildName
+                }
+            ];
+        }
+
+        const title = await spotifyOEmbedTitle(normalized);
+        if (!title) throw new Error('SPOTIFY_API_FALHOU');
+        const found = await youtubeSearchFirstUrl(`${title} audio`);
+        if (!found) throw new Error('SPOTIFY_SEM_RESULTADO');
+        return [
+            {
+                url: found.url,
+                title,
+                requestedById,
+                source: 'Spotify',
+                guildName
+            }
+        ];
+    }
+
+    if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) throw new Error('SPOTIFY_PRECISA_CREDENCIAIS');
+
+    if (info.kind === 'album') {
+        const album = await spotifyApiGet(`/v1/albums/${info.id}`, { market: SPOTIFY_MARKET });
+        const albumName = String(album?.name ?? '').trim();
+        const items = Array.isArray(album?.tracks?.items) ? album.tracks.items : [];
+        const tracks = [];
+        const max = Math.min(50, items.length);
+        for (let i = 0; i < max; i++) {
+            const t = items[i];
+            const name = String(t?.name ?? '').trim();
+            const artists = Array.isArray(t?.artists) ? t.artists.map((a) => a?.name) : [];
+            const query = buildSpotifyQueryFromTrackMeta({ name, artists });
+            if (!query) continue;
+            const found = await youtubeSearchFirstUrl(query);
+            if (!found) continue;
+            tracks.push({ url: found.url, title: `${name || found.title} • ${albumName || 'Album'}`, requestedById, source: 'Spotify', guildName });
+        }
+        if (!tracks.length) throw new Error('SPOTIFY_SEM_RESULTADO');
+        return tracks;
+    }
+
+    if (info.kind === 'playlist') {
+        const tracks = [];
+        let offset = 0;
+        const limit = 100;
+        while (tracks.length < 50) {
+            const page = await spotifyApiGet(`/v1/playlists/${info.id}/tracks`, { market: SPOTIFY_MARKET, limit, offset });
+            const items = Array.isArray(page?.items) ? page.items : [];
+            if (!items.length) break;
+            for (const item of items) {
+                if (tracks.length >= 50) break;
+                const tr = item?.track ?? null;
+                const name = String(tr?.name ?? '').trim();
+                const artists = Array.isArray(tr?.artists) ? tr.artists.map((a) => a?.name) : [];
+                const query = buildSpotifyQueryFromTrackMeta({ name, artists });
+                if (!query) continue;
+                const found = await youtubeSearchFirstUrl(query);
+                if (!found) continue;
+                tracks.push({ url: found.url, title: name || found.title, requestedById, source: 'Spotify', guildName });
+            }
+            offset += items.length;
+            if (items.length < limit) break;
+        }
+        if (!tracks.length) throw new Error('SPOTIFY_SEM_RESULTADO');
+        return tracks;
+    }
+
+    throw new Error('LINK_NAO_SUPORTADO');
+}
+
 function parseStyles(raw) {
     const text = String(raw ?? '').trim();
     if (!text) return [];
@@ -1849,9 +2036,10 @@ async function connectToVoice({ guild, voiceChannel }) {
 }
 
 async function enqueueFromLink({ link, requestedById, guildName }) {
-    const type = playdl.validate(link);
+    const resolved = await resolveFinalUrlIfShort(link);
+    const type = playdl.validate(resolved);
     if (!type) {
-        const q = parseYouTubeSearchQueryFromUrl(link);
+        const q = parseYouTubeSearchQueryFromUrl(resolved);
         if (!q) throw new Error('LINK_INVALIDO');
         const found = await youtubeSearchFirstUrl(q);
         if (!found) throw new Error('LINK_INVALIDO');
@@ -1867,7 +2055,7 @@ async function enqueueFromLink({ link, requestedById, guildName }) {
     }
 
     if (type === 'yt_playlist' || type === 'yt_music_playlist') {
-        const playlist = await withTimeout(playdl.playlist_info(link, { incomplete: true }), 20000, 'yt-playlist').catch(() => null);
+        const playlist = await withTimeout(playdl.playlist_info(resolved, { incomplete: true }), 20000, 'yt-playlist').catch(() => null);
         if (!playlist) throw new Error('LINK_INVALIDO');
         const videos = await withTimeout(playlist.all_videos(), 30000, 'yt-playlist-videos').catch(() => []);
         return videos.map((v) => ({
@@ -1880,12 +2068,12 @@ async function enqueueFromLink({ link, requestedById, guildName }) {
     }
 
     if (type === 'yt_video' || type === 'yt_short' || type === 'yt_music_video') {
-        const info = await withTimeout(playdl.video_info(link), 20000, 'yt-video-info').catch(() => null);
+        const info = await withTimeout(playdl.video_info(resolved), 20000, 'yt-video-info').catch(() => null);
         if (!info) throw new Error('LINK_INVALIDO');
         const v = info?.video_details;
         return [
             {
-                url: link,
+                url: resolved,
                 title: v?.title || 'Sem título',
                 requestedById,
                 source: 'YouTube',
@@ -1894,31 +2082,8 @@ async function enqueueFromLink({ link, requestedById, guildName }) {
         ];
     }
 
-    if (type === 'sp_playlist') {
-        const playlist = await withTimeout(playdl.spotify(link), 20000, 'sp-playlist').catch(() => null);
-        if (!playlist || playlist.type !== 'playlist') throw new Error('LINK_INVALIDO');
-        const tracks = await withTimeout(playlist.all_tracks(), 30000, 'sp-playlist-tracks').catch(() => []);
-        return tracks.map((t) => ({
-            url: t.url,
-            title: t.name || 'Sem título',
-            requestedById,
-            source: 'Spotify',
-            guildName
-        }));
-    }
-
-    if (type === 'sp_track') {
-        const track = await withTimeout(playdl.spotify(link), 20000, 'sp-track').catch(() => null);
-        if (!track || track.type !== 'track') throw new Error('LINK_INVALIDO');
-        return [
-            {
-                url: track.url,
-                title: track.name || 'Sem título',
-                requestedById,
-                source: 'Spotify',
-                guildName
-            }
-        ];
+    if (type === 'sp_track' || type === 'sp_playlist' || type === 'sp_album') {
+        return await resolveSpotifyToTracks(resolved, requestedById, guildName);
     }
 
     throw new Error('LINK_NAO_SUPORTADO');
@@ -3214,6 +3379,21 @@ client.on('interactionCreate', async (interaction) => {
                 }
                 if (code === 'LINK_NAO_SUPORTADO') {
                     await replyAndDelete(interaction, '❌ Link não suportado. Use vídeo/playlist do YouTube (ou Spotify).');
+                    return;
+                }
+                if (code === 'SPOTIFY_PRECISA_CREDENCIAIS') {
+                    await replyAndDelete(
+                        interaction,
+                        '❌ Spotify: para tocar playlist/album é necessário configurar SPOTIFY_CLIENT_ID e SPOTIFY_CLIENT_SECRET.\nTrack individual funciona sem isso.'
+                    );
+                    return;
+                }
+                if (code === 'SPOTIFY_API_FALHOU') {
+                    await replyAndDelete(interaction, '❌ Spotify: não consegui buscar os dados agora. Tente novamente.');
+                    return;
+                }
+                if (code === 'SPOTIFY_SEM_RESULTADO') {
+                    await replyAndDelete(interaction, '❌ Spotify: não achei um resultado no YouTube para essa música.');
                     return;
                 }
                 logError('Erro no modal musicpanel_addlink_modal', err);
