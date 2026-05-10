@@ -5270,7 +5270,22 @@ client.on('interactionCreate', async (interaction) => {
 
         if (id === 'musicpanel_mix') {
             try {
-                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+                try {
+    if (interaction.replied || interaction.deferred) return;
+
+    await interaction.deferReply({
+        flags: MessageFlags.Ephemeral
+    });
+} catch (err) {
+    const code = Number(err?.code ?? err?.rawError?.code ?? 0);
+
+    if (code === 10062 || code === 40060) {
+        console.log('Modal musicpanel_addlink_modal expirou ou já foi respondido.');
+        return;
+    }
+
+    throw err;
+}
                 if (!(await ensureCanPlayNow(interaction))) return;
                 const voiceChannel = interaction.member?.voice?.channel ?? null;
                 if (!voiceChannel || (voiceChannel.type !== ChannelType.GuildVoice && voiceChannel.type !== ChannelType.GuildStageVoice)) {
